@@ -2,13 +2,13 @@ import os
 import tarfile
 import zipfile
 import tempfile
-from typing import List, Dict, Any
+import shutil
+from typing import List, Dict
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="FLACO X Forensic Engine", version="8.5")
+app = FastAPI(title="FLACO X Forensic Engine", version="8.6")
 
-# Permitir conexiones desde GitHub Pages o cualquier cliente
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,14 +17,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Lista de Keys VIP válidas
 VALID_KEYS = [
     "FLACOX-VIP-S9RRY8",
     "FLACOX-VIP-ADMIN",
     "FLACOX-VIP-TEST"
 ]
 
-# Diccionario de firma de patrones por categoría
 CATEGORY_RULES = {
     "PROXY DNS": ["dns", "dnsproxyd", "nextdns", "adguard", "dnscloak", "1.1.1.1", "quad9"],
     "FREE FIRE": ["com.dts.freefireth", "freefire", "ff.app", "shadowrealm"],
@@ -49,7 +47,7 @@ CATEGORY_RULES = {
 
 @app.get("/")
 def read_root():
-    return {"status": "online", "system": "FLACO X Forensic Engine v8.5 Ready"}
+    return {"status": "online", "system": "FLACO X Forensic Engine v8.6 Ready"}
 
 @app.post("/scan")
 async def scan_file(
@@ -57,55 +55,50 @@ async def scan_file(
     serial: str = Form(None),
     file: UploadFile = File(...)
 ):
-    # 1. Validación de Key VIP
     if key not in VALID_KEYS:
         raise HTTPException(status_code=401, detail="Clave VIP de acceso inválida o expirada.")
 
     if not file:
         raise HTTPException(status_code=400, detail="No se ha recibido ningún archivo de diagnóstico.")
 
-    # 2. Guardar y procesar archivo temporalmente
     file_matches: Dict[str, List[str]] = {cat: [] for cat in CATEGORY_RULES}
     
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_file_path = os.path.join(temp_dir, file.filename)
+        
+        # Escritura por bloques (streams) para no saturar la RAM
         with open(temp_file_path, "wb") as buffer:
-            buffer.write(await file.read())
+            shutil.copyfileobj(file.file, buffer)
 
-        extracted_files = []
+        filename_lower = file.filename.lower()
+
         try:
-            if file.filename.endswith(".tar.gz") or file.filename.endswith(".tgz") or file.filename.endswith(".gz"):
+            if filename_lower.endswith(".tar.gz") or filename_lower.endswith(".tgz") or filename_lower.endswith(".gz"):
                 with tarfile.open(temp_file_path, "r:*") as tar:
-                    for member in tar.getmembers()[:2000]: # Límite para optimizar memoria RAM
-                        extracted_files.append(member.name.lower())
-            elif file.filename.endswith(".zip"):
+                    for member in tar.getmembers():
+                        path_name = member.name.lower()
+                        for cat_name, keywords in CATEGORY_RULES.items():
+                            for kw in keywords:
+                                if kw in path_name and kw not in file_matches[cat_name]:
+                                    file_matches[cat_name].append(kw)
+            elif filename_lower.endswith(".zip"):
                 with zipfile.ZipFile(temp_file_path, "r") as zip_ref:
-                    for name in zip_ref.namelist()[:2000]:
-                        extracted_files.append(name.lower())
-            else:
-                extracted_files.append(file.filename.lower())
-        except Exception:
-            # Fallback en caso de que el archivo esté plano
-            extracted_files.append(file.filename.lower())
+                    for name in zip_ref.namelist():
+                        path_name = name.lower()
+                        for cat_name, keywords in CATEGORY_RULES.items():
+                            for kw in keywords:
+                                if kw in path_name and kw not in file_matches[cat_name]:
+                                    file_matches[cat_name].append(kw)
+        except Exception as e:
+            pass
 
-        # 3. Análisis forense de coincidencias
-        for path in extracted_files:
-            for cat_name, keywords in CATEGORY_RULES.items():
-                for kw in keywords:
-                    if kw in path and kw not in file_matches[cat_name]:
-                        file_matches[cat_name].append(kw)
-
-    # 4. Formatear la lista de resultados para el Frontend
-    results = []
-
-    # Agregar la categoría general de registro completado al inicio
-    results.append({
+    results = [{
         "name": "REGISTRO COMPLETADO",
         "desc": f"Dispositivo analizado: {serial if serial else 'No especificado'}",
         "status": "COMPLETADO",
         "count": 0,
         "matches": []
-    })
+    }]
 
     for cat_name, matches in file_matches.items():
         is_threat = len(matches) > 0
